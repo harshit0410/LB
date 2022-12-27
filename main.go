@@ -2,13 +2,13 @@ package main
 
 import (
 	"context"
-	"flag"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"strings"
 	"time"
 
 	"github.com/harshit0410/LB/backend"
@@ -64,10 +64,8 @@ func LB(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "Service not available", http.StatusServiceUnavailable)
 }
 
-func addServerToPool(serverList string) {
-
-	tokens := strings.Split(serverList, ",")
-	for _, tok := range tokens {
+func addServerToPool(serverList []string) {
+	for _, tok := range serverList {
 		serverUrl, err := url.Parse(tok)
 		if err != nil {
 			log.Fatal(err)
@@ -105,28 +103,39 @@ func addServerToPool(serverList string) {
 	}
 }
 
-func main() {
-	var serverList string
-	var port int
-	flag.StringVar(&serverList, "backends", "", "Load balanced backends, use commas to separate")
-	flag.IntVar(&port, "port", 3030, "Port to serve")
-	flag.Parse()
+type Config struct {
+	Port string   `json:"port"`
+	Urls []string `json:"urls"`
+}
 
-	if len(serverList) == 0 {
+var cfg Config
+
+func main() {
+	data, err := ioutil.ReadFile("./config.json")
+	if err != nil {
+		log.Fatal(err.Error())
+	}
+	json.Unmarshal(data, &cfg)
+
+	if len(cfg.Urls) == 0 {
 		log.Fatal("Please provide one or more backends to load balance")
 	}
 
-	addServerToPool(serverList)
+	addServerToPool(cfg.Urls)
+
+	if cfg.Port == "" {
+		cfg.Port = "3000"
+	}
 
 	server := http.Server{
-		Addr:    fmt.Sprintf(":%d", port),
+		Addr:    fmt.Sprintf(":%s", cfg.Port),
 		Handler: http.HandlerFunc(LB),
 	}
 
 	// start health checking
 	go HealthCheck()
 
-	log.Printf("Load Balancer started at :%d\n", port)
+	log.Printf("Load Balancer started at :%s\n", cfg.Port)
 	if err := server.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
