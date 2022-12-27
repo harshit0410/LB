@@ -19,6 +19,10 @@ func (s *ServerPool) AddBackend(backend *backend.Backend) {
 	s.backends = append(s.backends, backend)
 }
 
+func (s *ServerPool) RemoveAllBackend() {
+	s.backends = make([]*backend.Backend, 0)
+}
+
 func (s *ServerPool) NextIndex() int {
 	return int(atomic.AddUint64(&s.current, uint64(1)) % uint64(len(s.backends)))
 }

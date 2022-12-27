@@ -9,8 +9,13 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/harshit0410/LB/backend"
 	"github.com/harshit0410/LB/serverpool"
 )
@@ -36,16 +41,22 @@ func GetRetryFromContext(r *http.Request) int {
 	return 0
 }
 
-func HealthCheck() {
-	t := time.NewTicker(time.Second * 20)
+func HealthCheck(wg sync.WaitGroup, ctx context.Context) {
+	defer wg.Done()
+	t := time.NewTicker(time.Second * 10)
 	for {
 		select {
 		case <-t.C:
 			log.Println("Starting health check...")
 			serverPool.HealthCheck()
 			log.Println("Health check completed")
+
+		case <-ctx.Done():
+			fmt.Println("Closing the health checker")
+			return
 		}
 	}
+
 }
 
 func LB(w http.ResponseWriter, r *http.Request) {
@@ -104,8 +115,8 @@ func addServerToPool(serverList []string) {
 }
 
 type Config struct {
-	Port string   `json:"port"`
-	Urls []string `json:"urls"`
+	Port string   `json:"port" binding:"required"`
+	Urls []string `json:"urls" binding:"required"`
 }
 
 var cfg Config
@@ -127,16 +138,84 @@ func main() {
 		cfg.Port = "3000"
 	}
 
-	server := http.Server{
+	server := &http.Server{
 		Addr:    fmt.Sprintf(":%s", cfg.Port),
 		Handler: http.HandlerFunc(LB),
 	}
 
-	// start health checking
-	go HealthCheck()
+	router := mux.NewRouter().StrictSlash(true)
+	router.HandleFunc("/config", UpdateConfig).Methods("PUT")
+	server2 := &http.Server{
+		Addr:    ":3000",
+		Handler: router,
+	}
 
-	log.Printf("Load Balancer started at :%s\n", cfg.Port)
-	if err := server.ListenAndServe(); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	var wg sync.WaitGroup
+	wg.Add(3)
+
+	// start health checking
+	go HealthCheck(wg, ctx)
+
+	go startServer(wg, server)
+	go startServer(wg, server2)
+	go stopServer(wg, ctx, server2)
+	go stopServer(wg, ctx, server)
+
+	wg.Wait()
+	log.Println("Closed ALl HTTP Server")
+	// log.Printf("Load Balancer started at :%s\n", cfg.Port)
+	// if err := server.ListenAndServe(); err != nil {
+	// 	log.Fatal(err)
+	// }
+}
+
+func stopServer(wg sync.WaitGroup, ctx context.Context, server *http.Server) {
+	defer wg.Done()
+	<-ctx.Done()
+	log.Println("Closing HTTP Server")
+	if err := server.Shutdown(context.Background()); err != nil {
 		log.Fatal(err)
 	}
+}
+func startServer(wg sync.WaitGroup, server *http.Server) {
+	// defer wg.Done()
+	fmt.Printf("Starting server\n")
+	if err := server.ListenAndServe(); err != nil {
+		fmt.Println(err)
+	}
+
+}
+
+func UpdateConfig(w http.ResponseWriter, r *http.Request) {
+	requestBody, _ := ioutil.ReadAll(r.Body)
+
+	var inputConfig Config
+	err := json.Unmarshal(requestBody, &inputConfig)
+
+	if err != nil {
+		w.Header().Set("content-type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Println(err)
+
+		return
+	}
+
+	content, err := json.Marshal(inputConfig)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	err = ioutil.WriteFile("config.json", content, 0644)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	serverPool.RemoveAllBackend()
+	addServerToPool(inputConfig.Urls)
+
+	w.Header().Set("content-type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(inputConfig)
 }
